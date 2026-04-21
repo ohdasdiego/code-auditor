@@ -13,26 +13,32 @@
 - **Severity levels**: Critical 🔴 / Warning 🟡 / Info 🔵
 - **Health score**: 0–100 per file and repo average
 - **Clean terminal output**: Colored, structured CLI report — no browser needed
+- **Interactive fix mode**: Review all proposed fixes, apply by number, severity, or all at once
+- **Auto-fix mode**: Claude rewrites files with all issues resolved
+- **Dry-run mode**: Preview fixes as a unified diff before writing anything
 - **Git diff mode**: Only audit what changed in the last commit
-- **JSON export**: Machine-readable output for CI/CD integration (`--json`)
+- **JSON export**: Machine-readable output for CI/CD integration
+- **`.env` support**: Set your API key once, never export again
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Install dependencies
+### 1. Clone and install
 
 ```bash
+git clone https://github.com/ohdasdiego/code-auditor.git
+cd code-auditor
+python3 -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Set your API key
-
-Copy the example and add your key (only needed once):
+### 2. Set your API key (one time only)
 
 ```bash
 cp .env.example .env
-# Edit .env and paste your Anthropic API key
+nano .env  # paste your Anthropic API key
 ```
 
 Get your key at: https://console.anthropic.com/
@@ -43,31 +49,37 @@ Get your key at: https://console.anthropic.com/
 
 ```bash
 # Audit a repo (auto-detects languages)
-python audit.py ./my-project
+python3 audit.py ./my-project
 
 # Audit only Python files
-python audit.py ./my-project --lang python
+python3 audit.py ./my-project --lang python
 
 # Only audit files changed in last git commit
-python audit.py ./my-project --diff
+python3 audit.py ./my-project --diff
 
 # Filter to only critical issues
-python audit.py ./my-project --severity critical
+python3 audit.py ./my-project --severity critical
+
+# Interactive mode — review and pick which fixes to apply
+python3 audit.py ./my-project --interactive
 
 # Preview fixes as a diff (no files written)
-python audit.py ./my-project --fix --dry-run
+python3 audit.py ./my-project --fix --dry-run
 
 # Apply AI-generated fixes directly to source files
-python audit.py ./my-project --fix
+python3 audit.py ./my-project --fix
 
 # Also export raw JSON results
-python audit.py ./my-project --json
+python3 audit.py ./my-project --json
+
+# Check version
+python3 audit.py --version
 ```
 
 ### 4. Try the sample repo
 
 ```bash
-python audit.py ./sample_repo
+python3 audit.py ./sample_repo
 ```
 
 ---
@@ -81,17 +93,19 @@ python audit.py ./sample_repo
 | `--diff` | Only audit git-changed files | false |
 | `--severity` | Severity levels to show: `critical warning info` | all |
 | `--max-files` | Max files to audit | 20 |
-| `--json` | Save raw JSON results to `audit_report.json` | false |
-| `--model` | Override Claude model | `claude-sonnet-4-6` |
+| `--interactive` | Review fixes and choose which to apply | false |
 | `--fix` | Apply AI-generated fixes to source files | false |
 | `--dry-run` | Preview fixes as a diff, no files written (use with `--fix`) | false |
+| `--json` | Save raw JSON results to `audit_report.json` | false |
+| `--model` | Override Claude model | `claude-sonnet-4-6` |
+| `--version` | Show version and exit | — |
 
 ---
 
 ## 📊 Sample Output
 
 ```
-🔍 Scanning sample_repo  [auto-detect]
+Scanning sample_repo  [auto-detect]
 
 📂 Found 2 file(s) to audit...
 
@@ -124,31 +138,51 @@ python audit.py ./sample_repo
 ────────────────────────────────────────────────────────────
 ```
 
-Output includes per-file:
-- **Repo health score** (0–100 aggregate)
-- **Per-file health scores**
-- **Issue cards** with:
-  - Severity badge (🔴 Critical / 🟡 Warning / 🔵 Info)
-  - Rule name (e.g., `PEP8-E501`, `God Function`, `SQL Injection`)
-  - Official guide citation (e.g., `PEP 8 §Naming Conventions`)
-  - Description of what's wrong and why
-  - Concrete suggestion or refactored snippet
+### Interactive Fix Mode
+
+```
+────────────────────────────────────────────────────────────
+  Fix Review — 17 proposed fix(es)
+────────────────────────────────────────────────────────────
+
+  [ 1]  CRITICAL  utils/helpers.py  line 6
+         Hardcoded Secret  —  API_KEY is hardcoded as a string literal...
+         fix: API_KEY = os.environ.get('API_KEY')
+
+  [ 2]  CRITICAL  utils/helpers.py  line 56
+         SQL Injection  —  String concatenation used to build SQL query...
+         fix: cursor.execute('SELECT * FROM users WHERE id = ?', (uid,))
+  ...
+
+Which fixes do you want to apply?
+  Enter numbers (e.g. 1,3,5)
+  or 'all'       - apply everything
+  or 'critical'  - apply all critical fixes
+  or 'warning'   - apply all warning fixes
+  or 'none'      - skip all
+
+> critical
+  Selected 11 critical fix(es).
+  Fixing utils/helpers.py (8 issue(s))... Done
+  Fixing models/order.py (3 issue(s))...  Done
+```
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-audit.py              ← CLI entry point (argparse)
+audit.py              ← CLI entry point (argparse, .env auto-load, interactive mode)
 src/
   auditor.py          ← File discovery, async Claude API calls, scoring, fix orchestration
   prompts.py          ← System/user/fix prompt templates per language
   fixer.py            ← Applies fixes, dry-run diffs, .audit-state.json tracking
   languages.py        ← Extension → language mapping
-  reporter.py         ← HTML + JSON report generation (includes fix diffs)
+  reporter.py         ← Colored terminal report output
 sample_repo/          ← Intentionally bad code for demo
   utils/helpers.py
   models/order.py
+.env.example          ← API key template (copy to .env)
 .audit-state.json     ← Tracks fixed/accepted issues across runs (auto-generated)
 ```
 
@@ -162,15 +196,15 @@ Add to `.github/workflows/audit.yml`:
 - name: Run Code Audit
   run: |
     pip install -r requirements.txt
-    python audit.py . --diff --severity critical --output audit.html
+    python3 audit.py . --diff --severity critical --json
   env:
     ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
-- name: Upload Audit Report
+- name: Upload Audit Results
   uses: actions/upload-artifact@v3
   with:
     name: code-audit
-    path: audit.html
+    path: audit_report.json
 ```
 
 ---
@@ -179,8 +213,10 @@ Add to `.github/workflows/audit.yml`:
 
 - [x] `--fix` mode: Claude rewrites files with all issues resolved
 - [x] `--dry-run`: preview fixes as a unified diff before applying
+- [x] `--interactive`: review all fixes, apply by number, severity, or all at once
 - [x] `.audit-state.json`: tracks applied fixes, skips re-flagging on future runs
-- [ ] Interactive mode: review each fix one at a time before applying
+- [x] `.env` auto-load: set API key once
+- [x] `--version` flag
 - [ ] Java support (JavaParser AST)
 - [ ] Cross-file analysis (duplicate logic detection)
 - [ ] VS Code extension
@@ -199,26 +235,28 @@ Add to `.github/workflows/audit.yml`:
 
 ---
 
----
-
 ## 💰 Cost Analysis
 
-Audit cost depends on file count and size. Each file makes one API call.
+Each file makes two API calls: one for the audit, one for fixes (if requested).
 
-Default model: `claude-sonnet-4-6` ($3.00/M input tokens, $15.00/M output tokens)
+**Default model:** `claude-sonnet-4-6` ($3.00/M input · $15.00/M output tokens)
 
-| Files audited | Avg tokens/file | Est. cost |
+| Files audited | Mode | Est. cost |
 |---|---|---|
-| 5 | ~1,500 in / ~500 out | ~$0.03 |
-| 20 | ~1,500 in / ~500 out | ~$0.12 |
-| 50 | ~1,500 in / ~500 out | ~$0.30 |
+| 5 | audit only | ~$0.02 |
+| 20 | audit only | ~$0.09 |
+| 50 | audit only | ~$0.22 |
+| 5 | audit + fix all | ~$0.05 |
+| 20 | audit + fix all | ~$0.18 |
+| 50 | audit + fix all | ~$0.45 |
 
 **Cost-saving options:**
-- Use `--model claude-haiku-4-5` for faster, cheaper runs (~6× cheaper, slightly less precise)
+- Use `--model claude-haiku-4-5` for ~6× cheaper runs (slightly less precise)
 - Use `--diff` to only audit changed files in CI/CD
+- Use `--interactive` to fix only what matters — skip issues you don't care about
 - Use `--max-files` to cap spend on large repos
 
-> Per-run cost on a typical 20-file project is well under $0.25.
+> A typical 20-file audit-only run costs under $0.10.
 
 ---
 
