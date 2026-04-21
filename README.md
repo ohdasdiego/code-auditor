@@ -28,9 +28,16 @@ pip install -r requirements.txt
 
 ### 2. Set your API key
 
+Copy the example and add your key (only needed once):
+
 ```bash
-export ANTHROPIC_API_KEY=your_api_key_here
+cp .env.example .env
+# Edit .env and paste your Anthropic API key
 ```
+
+Get your key at: https://console.anthropic.com/
+
+> The tool loads `.env` automatically — no `export` needed.
 
 ### 3. Run an audit
 

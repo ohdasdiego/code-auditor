@@ -6,11 +6,22 @@ Usage: python3 audit.py <path-to-repo> [options]
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
+
+# Auto-load .env if present — must happen before any imports that read env vars
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv optional; fall back to env vars
+
 from src.auditor import CodeAuditor
 from src.reporter import generate_report
 from src.fixer import apply_fix, record_fixes, mark_accepted
+
+__version__ = "1.0.0"
 
 # ANSI helpers for interactive mode
 _BOLD   = "\033[1m"
@@ -26,7 +37,7 @@ SEV_COLOR = {"critical": _RED, "warning": _YELLOW, "info": "\033[94m"}
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="AI Code Auditor - Powered by Claude",
+        description="AI Code Auditor v" + __version__ + " - Powered by Claude",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -60,6 +71,7 @@ Examples:
                         help="Preview fixes as a diff without writing any files (use with --fix)")
     parser.add_argument("--interactive", action="store_true",
                         help="Review all proposed fixes and choose which to apply by number")
+    parser.add_argument("--version", action="version", version=f"code-auditor {__version__}")
     return parser.parse_args()
 
 
@@ -176,6 +188,15 @@ async def main():
 
     if not repo_path.exists():
         print(f"Error: Path not found: {repo_path}")
+        sys.exit(1)
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("\nError: ANTHROPIC_API_KEY not set.")
+        print("  Option 1 (recommended): Add it to a .env file in this directory:")
+        print("    cp .env.example .env  # then edit .env and paste your key")
+        print("  Option 2: Export it in your shell:")
+        print("    export ANTHROPIC_API_KEY=your_key_here")
+        print("\n  Get your key at: https://console.anthropic.com/\n")
         sys.exit(1)
 
     fix_mode = ""
