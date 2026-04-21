@@ -171,7 +171,7 @@ class CodeAuditor:
         def _sync_call():
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=2048,
+                max_tokens=8192,
                 system=build_system_prompt(lang),
                 messages=[
                     {"role": "user", "content": build_user_prompt(code, lang, file_path)}
@@ -181,13 +181,28 @@ class CodeAuditor:
 
         try:
             raw = await loop.run_in_executor(None, _sync_call)
-            # Strip markdown fences if present
+            # Strip markdown fences if present (```json or ```)
             clean = raw.strip()
             if clean.startswith("```"):
                 clean = "\n".join(clean.split("\n")[1:])
-            if clean.endswith("```"):
-                clean = "\n".join(clean.split("\n")[:-1])
-            return json.loads(clean.strip())
+            if "```" in clean:
+                clean = clean[:clean.rfind("```")].strip()
+            clean = clean.strip()
+            # Handle truncated JSON: find the last complete object in the array
+            try:
+                return json.loads(clean)
+            except json.JSONDecodeError:
+                # Try to recover by truncating to last valid closing brace
+                last_brace = clean.rfind("}")
+                if last_brace > 0:
+                    truncated = clean[:last_brace + 1]
+                    # Ensure it's a valid array
+                    if not truncated.strip().startswith("["):
+                        truncated = "[" + truncated
+                    if not truncated.strip().endswith("]"):
+                        truncated = truncated + "]"
+                    return json.loads(truncated)
+                raise
         except json.JSONDecodeError:
             print(f"    ⚠️  Could not parse JSON response for {file_path}")
             return []
