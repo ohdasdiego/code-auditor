@@ -12,9 +12,9 @@
 - **Security flags**: Hardcoded secrets, SQL injection risks
 - **Severity levels**: Critical 🔴 / Warning 🟡 / Info 🔵
 - **Health score**: 0–100 per file and repo average
-- **Beautiful HTML report**: Dark-mode dashboard with collapsible file cards
+- **Clean terminal output**: Colored, structured CLI report — no browser needed
 - **Git diff mode**: Only audit what changed in the last commit
-- **JSON export**: Machine-readable output for CI/CD integration
+- **JSON export**: Machine-readable output for CI/CD integration (`--json`)
 
 ---
 
@@ -53,8 +53,8 @@ python audit.py ./my-project --fix --dry-run
 # Apply AI-generated fixes directly to source files
 python audit.py ./my-project --fix
 
-# Save HTML report to custom path + also save JSON
-python audit.py ./my-project --output reports/audit.html --json
+# Also export raw JSON results
+python audit.py ./my-project --json
 ```
 
 ### 4. Try the sample repo
@@ -72,10 +72,9 @@ python audit.py ./sample_repo
 | `repo_path` | Path to repo or folder | required |
 | `--lang` | Languages to audit: `python java javascript typescript` | auto-detect |
 | `--diff` | Only audit git-changed files | false |
-| `--output` | HTML report output path | `audit_report.html` |
 | `--severity` | Severity levels to show: `critical warning info` | all |
 | `--max-files` | Max files to audit | 20 |
-| `--json` | Also save raw JSON results | false |
+| `--json` | Save raw JSON results to `audit_report.json` | false |
 | `--model` | Override Claude model | `claude-sonnet-4-6` |
 | `--fix` | Apply AI-generated fixes to source files | false |
 | `--dry-run` | Preview fixes as a diff, no files written (use with `--fix`) | false |
@@ -84,14 +83,47 @@ python audit.py ./sample_repo
 
 ## 📊 Sample Output
 
-The HTML report includes:
+```
+🔍 Scanning sample_repo  [auto-detect]
 
+📂 Found 2 file(s) to audit...
+
+────────────────────────────────────────────────────────────
+  🔍 AI Code Audit Report  2026-04-21 04:25 UTC
+────────────────────────────────────────────────────────────
+
+  Repo Health Score:  0/100
+  Files Reviewed:     2
+  Total Issues:       51  17 critical  32 warnings  2 info
+
+  📄 utils/helpers.py
+  Python · 35 issue(s) · Score: 0/100
+  ──────────────────────────────────────────────────────────
+
+  🔴 CRITICAL  line 6   Hardcoded Secret
+  API_KEY is hardcoded as a string literal in source code.
+  📖 Google Python Style Guide §Security / OWASP A02
+  💡 Use environment variables: API_KEY = os.environ.get('API_KEY')
+
+  🔴 CRITICAL  line 56  SQL Injection Vulnerability
+  String concatenation used to build SQL query with user input.
+  📖 OWASP A03 / Google Python Style Guide §Security
+  💡 Use parameterized queries: cursor.execute('SELECT ...', (value,))
+
+  ...
+
+────────────────────────────────────────────────────────────
+  ⚠  17 critical issue(s) need attention.
+────────────────────────────────────────────────────────────
+```
+
+Output includes per-file:
 - **Repo health score** (0–100 aggregate)
 - **Per-file health scores**
 - **Issue cards** with:
-  - Severity badge
-  - Rule name (e.g., `PEP8-E501`, `God Function`)
-  - Official guide citation (e.g., `PEP 8 §Function Complexity`)
+  - Severity badge (🔴 Critical / 🟡 Warning / 🔵 Info)
+  - Rule name (e.g., `PEP8-E501`, `God Function`, `SQL Injection`)
+  - Official guide citation (e.g., `PEP 8 §Naming Conventions`)
   - Description of what's wrong and why
   - Concrete suggestion or refactored snippet
 

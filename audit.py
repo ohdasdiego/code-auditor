@@ -30,8 +30,6 @@ Examples:
                         help="Languages to audit (default: auto-detect all supported)")
     parser.add_argument("--diff", action="store_true",
                         help="Only audit files changed in the last git commit")
-    parser.add_argument("--output", default="audit_report.html",
-                        help="Output file for the HTML report (default: audit_report.html)")
     parser.add_argument("--severity", nargs="+",
                         default=["critical", "warning", "info"],
                         choices=["critical", "warning", "info"],
@@ -39,7 +37,7 @@ Examples:
     parser.add_argument("--max-files", type=int, default=20,
                         help="Max files to audit (default: 20)")
     parser.add_argument("--json", action="store_true",
-                        help="Also save raw JSON results alongside the HTML report")
+                        help="Save raw JSON results to audit_report.json")
     parser.add_argument("--model", default=None,
                         help="Override the Claude model (default: claude-sonnet-4-6)")
     parser.add_argument("--fix", action="store_true",
@@ -57,15 +55,11 @@ async def main():
         print(f"❌ Path not found: {repo_path}")
         sys.exit(1)
 
-    print(f"\n🔍 Code Auditor — AI-Powered Code Review")
-    print(f"{'=' * 50}")
-    print(f"📁 Repo: {repo_path}")
-    print(f"🌐 Languages: {', '.join(args.lang) if args.lang else 'auto-detect'}")
-    print(f"🎯 Severity filter: {', '.join(args.severity)}")
+    fix_mode = ""
     if args.fix:
-        mode = "DRY RUN (no files written)" if args.dry_run else "APPLY FIXES"
-        print(f"🔧 Fix mode: {mode}")
-    print(f"{'=' * 50}\n")
+        fix_mode = f" · fix={'dry-run' if args.dry_run else 'apply'}"
+    lang_str = ', '.join(args.lang) if args.lang else 'auto-detect'
+    print(f"\n🔍 Scanning {repo_path.name}  [{lang_str}{fix_mode}]\n")
 
     auditor = CodeAuditor(
         repo_path=repo_path,
@@ -84,24 +78,8 @@ async def main():
         print("✅ No files found to audit.")
         return
 
-    output_path = Path(args.output)
+    output_path = Path("audit_report")  # base path for JSON if requested
     generate_report(results, output_path, save_json=args.json)
-
-    total_issues = sum(len(r.get("issues", [])) for r in results)
-    critical = sum(1 for r in results for i in r.get("issues", []) if i.get("severity") == "critical")
-    warnings = sum(1 for r in results for i in r.get("issues", []) if i.get("severity") == "warning")
-    files_fixed = sum(1 for r in results if r.get("fix_result") and r["fix_result"].get("status") == "applied")
-    files_dry = sum(1 for r in results if r.get("fix_result") and r["fix_result"].get("status") == "dry-run")
-
-    print(f"\n{'=' * 50}")
-    print(f"✅ Audit complete! {len(results)} file(s) reviewed.")
-    print(f"   🔴 Critical: {critical}  🟡 Warning: {warnings}  🔵 Total: {total_issues}")
-    if files_fixed:
-        print(f"   🔧 Files fixed: {files_fixed} (backups saved as *.audit-backup)")
-    if files_dry:
-        print(f"   👁️  Dry-run diffs generated for {files_dry} file(s) — no files written")
-    print(f"   📄 Report: {output_path.resolve()}")
-    print(f"{'=' * 50}\n")
 
 
 if __name__ == "__main__":
