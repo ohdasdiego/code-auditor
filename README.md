@@ -217,6 +217,7 @@ Add to `.github/workflows/audit.yml`:
 - [x] `.audit-state.json`: tracks applied fixes, skips re-flagging on future runs
 - [x] `.env` auto-load: set API key once
 - [x] `--version` flag
+- [ ] Multi-provider support (OpenAI, Gemini, local models via Ollama)
 - [ ] Java support (JavaParser AST)
 - [ ] Cross-file analysis (duplicate logic detection)
 - [ ] VS Code extension
