@@ -265,4 +265,4 @@ Each file makes two API calls: one for the audit, one for fixes (if requested).
 
 **Diego Perez** · [github.com/ohdasdiego](https://github.com/ohdasdiego)
 
-Built with ❤️ using [Anthropic Claude API](https://docs.anthropic.com)
+Integrates the [Anthropic Claude API](https://docs.anthropic.com) for AI-powered code analysis.
