@@ -120,8 +120,10 @@ async def run_interactive(auditor: CodeAuditor, results: list):
     # Prompt
     print(f"{_BOLD}Which fixes do you want to apply?{_RESET}")
     print(f"  Enter numbers separated by commas  {_GRAY}(e.g. 1,3,5){_RESET}")
-    print(f"  or {_BOLD}'all'{_RESET} to apply everything")
-    print(f"  or {_BOLD}'none'{_RESET} to skip all\n")
+    print(f"  or {_BOLD}'all'{_RESET}       - apply everything")
+    print(f"  or {_BOLD}'critical'{_RESET}  - apply all critical fixes")
+    print(f"  or {_BOLD}'warning'{_RESET}   - apply all warning fixes")
+    print(f"  or {_BOLD}'none'{_RESET}      - skip all\n")
 
     try:
         raw = input(f"{_CYAN}> {_RESET}").strip().lower()
@@ -135,6 +137,15 @@ async def run_interactive(auditor: CodeAuditor, results: list):
 
     if raw == "all":
         selected = list(range(len(fixable)))
+    elif raw in ("critical", "warning", "info"):
+        selected = [
+            i for i, item in enumerate(fixable)
+            if item["issue"].get("severity") == raw
+        ]
+        if not selected:
+            print(f"\n{_GRAY}No {raw} issues found. Nothing applied.{_RESET}")
+            return
+        print(f"  {_GRAY}Selected {len(selected)} {raw} fix(es).{_RESET}")
     else:
         selected = []
         for part in raw.split(","):
