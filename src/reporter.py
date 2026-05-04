@@ -21,9 +21,9 @@ WHITE  = "\033[97m"
 GRAY   = "\033[90m"
 
 SEVERITY_STYLE = {
-    "critical": (RED,    "🔴 CRITICAL"),
-    "warning":  (YELLOW, "🟡 WARNING "),
-    "info":     (BLUE,   "🔵 INFO    "),
+    "critical": (RED,    "[CRIT]   "),
+    "warning":  (YELLOW, "[WARN]   "),
+    "info":     (BLUE,   "[INFO]   "),
 }
 
 
@@ -32,7 +32,7 @@ def generate_report(results: list[dict], output_path: Path, save_json: bool = Fa
     if save_json:
         json_path = output_path.with_suffix(".json")
         json_path.write_text(json.dumps(results, indent=2))
-        print(f"   📦 JSON saved: {json_path.resolve()}")
+        print(f"   JSON saved: {json_path.resolve()}")
 
     _print_report(results)
 
@@ -54,7 +54,7 @@ def _print_report(results: list[dict]):
     # ── Header ──────────────────────────────────────────────────
     print()
     print(f"{BOLD}{CYAN}{'─' * W}{RESET}")
-    print(f"{BOLD}{CYAN}  🔍 AI Code Audit Report{RESET}  {GRAY}{now}{RESET}")
+    print(f"{BOLD}{CYAN}  AI Code Audit Report{RESET}  {GRAY}{now}{RESET}")
     print(f"{BOLD}{CYAN}{'─' * W}{RESET}")
 
     # ── Summary row ─────────────────────────────────────────────
@@ -73,9 +73,9 @@ def _print_report(results: list[dict]):
     # ── Footer ───────────────────────────────────────────────────
     print(f"\n{BOLD}{CYAN}{'─' * W}{RESET}")
     if critical_count > 0:
-        print(f"  {RED}{BOLD}⚠  {critical_count} critical issue(s) need attention.{RESET}")
+        print(f"  {RED}{BOLD}[!] {critical_count} critical issue(s) need attention.{RESET}")
     else:
-        print(f"  {GREEN}{BOLD}✅  No critical issues found.{RESET}")
+        print(f"  {GREEN}{BOLD}[OK] No critical issues found.{RESET}")
     print(f"{BOLD}{CYAN}{'─' * W}{RESET}\n")
 
 
@@ -88,18 +88,18 @@ def _print_file(result: dict, width: int):
 
     score_color = GREEN if score >= 80 else YELLOW if score >= 50 else RED
 
-    print(f"\n  {BOLD}{CYAN}📄 {filepath}{RESET}{GRAY}{truncated}{RESET}")
+    print(f"\n  {BOLD}{CYAN}{filepath}{RESET}{GRAY}{truncated}{RESET}")
     print(f"  {GRAY}{lang} · {len(issues)} issue(s) · Score: "
           f"{score_color}{BOLD}{score}/100{RESET}")
     print(f"  {'─' * (width - 2)}")
 
     if not issues:
-        print(f"  {GREEN}✅  No issues found{RESET}")
+        print(f"  {GREEN}[OK] No issues found{RESET}")
         return
 
     for issue in issues:
         sev = issue.get("severity", "info")
-        color, label = SEVERITY_STYLE.get(sev, (GRAY, "⚪ UNKNOWN  "))
+        color, label = SEVERITY_STYLE.get(sev, (GRAY, "[?]      "))
         line  = f"line {issue['line']}" if issue.get("line") else "—"
         rule  = issue.get("rule", "")
         desc  = issue.get("description", "")
@@ -110,11 +110,11 @@ def _print_file(result: dict, width: int):
               f"{CYAN}{rule}{RESET}")
         print(f"  {WHITE}{desc}{RESET}")
         if src:
-            print(f"  {GRAY}📖 {src}{RESET}")
+            print(f"  {GRAY}Ref: {src}{RESET}")
         if sugg:
             # Indent multi-line suggestions
             lines = sugg.splitlines()
-            print(f"  {GREEN}💡 {lines[0]}{RESET}")
+            print(f"  {GREEN}Fix: {lines[0]}{RESET}")
             for l in lines[1:]:
                 print(f"     {GREEN}{l}{RESET}")
 
@@ -122,10 +122,10 @@ def _print_file(result: dict, width: int):
     fix = result.get("fix_result")
     if fix:
         if fix.get("status") == "applied":
-            print(f"\n  {GREEN}✅ {fix['issues_fixed']} issue(s) fixed — "
+            print(f"\n  {GREEN}[OK] {fix['issues_fixed']} issue(s) fixed -- "
                   f"backup: {fix['backup']}{RESET}")
         elif fix.get("status") == "dry-run" and fix.get("diff"):
-            print(f"\n  {YELLOW}👁  Dry-run diff:{RESET}")
+            print(f"\n  {YELLOW}Dry-run diff:{RESET}")
             for l in fix["diff"].splitlines():
                 if l.startswith("+"):
                     print(f"  {GREEN}{l}{RESET}")
