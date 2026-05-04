@@ -1,7 +1,8 @@
+.env
+*.bak.*
+.audit-state.json
+audit_report.json
 __pycache__/
 *.pyc
-.env
-*.html
-*.json
 venv/
 .venv/

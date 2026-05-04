@@ -1,137 +1,152 @@
 """
-fixer.py
-Applies Claude-generated fixes to source files.
-Supports --dry-run (preview only) and tracks applied fixes in .audit-state.json.
+Fixer — applies Claude-generated fixes and humanize rewrites to source files.
+
+Tracks applied fixes in .audit-state.json so re-runs skip already-fixed issues.
 """
 
+import difflib
 import json
-import subprocess
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
-
-AUDIT_STATE_FILE = ".audit-state.json"
 
 
-def load_state(repo_path: Path) -> dict:
-    state_file = repo_path / AUDIT_STATE_FILE
-    if state_file.exists():
-        try:
-            return json.loads(state_file.read_text())
-        except Exception:
-            pass
-    return {"fixed": [], "accepted": [], "deferred": []}
+STATE_FILE = ".audit-state.json"
 
 
-def save_state(repo_path: Path, state: dict):
-    state_file = repo_path / AUDIT_STATE_FILE
-    state_file.write_text(json.dumps(state, indent=2))
-
-
-def make_issue_key(file_path: str, issue: dict) -> str:
-    """Stable key to identify an issue across runs."""
-    return f"{file_path}:{issue.get('rule', 'unknown')}:line-{issue.get('line', '?')}"
-
+# ---------------------------------------------------------------------------
+# Core apply functions
+# ---------------------------------------------------------------------------
 
 def apply_fix(
     repo_path: Path,
-    file_path: str,
+    rel_file: str,
     original_code: str,
     fixed_code: str,
     issues: list,
     dry_run: bool = False,
 ) -> dict:
-    """
-    Write fixed code to file (unless dry_run).
-    Returns a summary of what was done.
-    """
-    abs_path = repo_path / file_path
+    abs_path = repo_path / rel_file
 
     if dry_run:
-        diff = _get_inline_diff(original_code, fixed_code, file_path)
+        diff = _unified_diff(original_code, fixed_code, rel_file)
         return {
-            "file": file_path,
-            "status": "dry-run",
-            "issues_fixed": len(issues),
+            "file": rel_file,
+            "dry_run": True,
             "diff": diff,
+            "issues_fixed": len(issues),
         }
 
-    # Back up original
-    backup_path = abs_path.with_suffix(abs_path.suffix + ".audit-backup")
-    backup_path.write_text(original_code, encoding="utf-8")
-
-    # Write fixed version
+    backup_path = _write_backup(abs_path)
     abs_path.write_text(fixed_code, encoding="utf-8")
 
-    diff = _get_git_diff(repo_path, file_path)
-
     return {
-        "file": file_path,
-        "status": "applied",
+        "file": rel_file,
+        "dry_run": False,
+        "backup": str(backup_path.relative_to(repo_path)),
         "issues_fixed": len(issues),
-        "backup": str(backup_path),
-        "diff": diff,
     }
 
 
-def record_fixes(repo_path: Path, file_path: str, issues: list):
-    """Persist applied fixes to .audit-state.json."""
-    state = load_state(repo_path)
-    for issue in issues:
-        key = make_issue_key(file_path, issue)
-        entry = {
-            "key": key,
-            "file": file_path,
-            "rule": issue.get("rule"),
-            "severity": issue.get("severity"),
-            "fixed_at": datetime.now(timezone.utc).isoformat(),
+def apply_humanize(
+    repo_path: Path,
+    rel_file: str,
+    original_code: str,
+    humanized_code: str,
+    dry_run: bool = False,
+) -> dict:
+    abs_path = repo_path / rel_file
+
+    if dry_run:
+        diff = _unified_diff(original_code, humanized_code, rel_file)
+        return {
+            "file": rel_file,
+            "dry_run": True,
+            "diff": diff,
+            "type": "humanize",
         }
-        # Avoid duplicates
-        if not any(f["key"] == key for f in state["fixed"]):
-            state["fixed"].append(entry)
-    save_state(repo_path, state)
+
+    backup_path = _write_backup(abs_path)
+    abs_path.write_text(humanized_code, encoding="utf-8")
+
+    return {
+        "file": rel_file,
+        "dry_run": False,
+        "backup": str(backup_path.relative_to(repo_path)),
+        "type": "humanize",
+    }
 
 
-def mark_accepted(repo_path: Path, file_path: str, issues: list):
-    """Mark issues as intentionally accepted (won't be re-flagged)."""
-    state = load_state(repo_path)
+# ---------------------------------------------------------------------------
+# State tracking
+# ---------------------------------------------------------------------------
+
+def record_fixes(repo_path: Path, rel_file: str, issues: list):
+    state = _load_state(repo_path)
+    file_state = state.setdefault(rel_file, {"fixed": [], "accepted": []})
     for issue in issues:
-        key = make_issue_key(file_path, issue)
-        if key not in state["accepted"]:
-            state["accepted"].append(key)
-    save_state(repo_path, state)
+        key = _issue_key(issue)
+        if key not in file_state["fixed"]:
+            file_state["fixed"].append(key)
+    state["_last_updated"] = datetime.now(timezone.utc).isoformat()
+    _save_state(repo_path, state)
 
 
-def filter_known_issues(repo_path: Path, file_path: str, issues: list) -> list:
-    """Remove issues already fixed or accepted in a previous run."""
-    state = load_state(repo_path)
-    known = set(state["accepted"]) | {f["key"] for f in state["fixed"]}
-    return [i for i in issues if make_issue_key(file_path, i) not in known]
+def mark_accepted(repo_path: Path, rel_file: str, issues: list):
+    state = _load_state(repo_path)
+    file_state = state.setdefault(rel_file, {"fixed": [], "accepted": []})
+    for issue in issues:
+        key = _issue_key(issue)
+        if key not in file_state["accepted"]:
+            file_state["accepted"].append(key)
+    _save_state(repo_path, state)
 
 
-def _get_git_diff(repo_path: Path, file_path: str) -> Optional[str]:
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--", file_path],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-        )
-        return result.stdout.strip() or None
-    except Exception:
-        return None
+def already_fixed(repo_path: Path, rel_file: str, issue: dict) -> bool:
+    state = _load_state(repo_path)
+    file_state = state.get(rel_file, {})
+    key = _issue_key(issue)
+    return key in file_state.get("fixed", []) or key in file_state.get("accepted", [])
 
 
-def _get_inline_diff(original: str, fixed: str, label: str) -> str:
-    """Simple line-by-line diff without subprocess."""
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _unified_diff(original: str, modified: str, filename: str) -> str:
     orig_lines = original.splitlines(keepends=True)
-    fixed_lines = fixed.splitlines(keepends=True)
-
-    import difflib
-    diff = list(difflib.unified_diff(
-        orig_lines, fixed_lines,
-        fromfile=f"a/{label}",
-        tofile=f"b/{label}",
+    mod_lines = modified.splitlines(keepends=True)
+    diff = difflib.unified_diff(
+        orig_lines,
+        mod_lines,
+        fromfile=f"a/{filename}",
+        tofile=f"b/{filename}",
         lineterm="",
-    ))
-    return "".join(diff) if diff else "(no changes)"
+    )
+    return "".join(diff)
+
+
+def _write_backup(path: Path) -> Path:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    backup = path.with_suffix(f".{ts}.bak{path.suffix}")
+    shutil.copy2(path, backup)
+    return backup
+
+
+def _issue_key(issue: dict) -> str:
+    return f"{issue.get('rule','')}:{issue.get('line','')}:{issue.get('category','')}"
+
+
+def _load_state(repo_path: Path) -> dict:
+    state_path = repo_path / STATE_FILE
+    if state_path.exists():
+        try:
+            return json.loads(state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_state(repo_path: Path, state: dict):
+    state_path = repo_path / STATE_FILE
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")

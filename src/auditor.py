@@ -1,5 +1,6 @@
 """
-Core auditor — discovers files, sends them to Claude, collects results.
+CodeAuditor — orchestrates file discovery, async Claude API calls,
+and coordinates all three audit passes (style, fingerprint, humanize).
 """
 
 import asyncio
@@ -7,238 +8,239 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Optional
+
 import anthropic
 
-from .prompts import build_system_prompt, build_user_prompt, build_fix_prompt
-from .languages import detect_language, SUPPORTED_EXTENSIONS
-from .fixer import apply_fix, record_fixes, filter_known_issues
+from src.languages import EXTENSION_MAP, LANGUAGE_EXTENSIONS, SKIP_DIRS, detect_language
+from src.prompts import (
+    get_style_prompts,
+    get_fingerprint_prompts,
+    get_humanize_prompts,
+    get_fix_prompts,
+)
 
-# Model — Sonnet balances reasoning quality with cost for code analysis
-MODEL = "claude-sonnet-4-6"
-
-# Max characters per file before we chunk it
-MAX_FILE_CHARS = 12_000
-
-# Health score deductions per severity
-SCORE_DEDUCTIONS = {"critical": 15, "warning": 5, "info": 1}
+DEFAULT_MODEL = "claude-sonnet-4-6"
+MAX_FILE_CHARS = 12_000  # truncate very large files to keep costs sane
 
 
 class CodeAuditor:
     def __init__(
         self,
         repo_path: Path,
-        languages: Optional[list] = None,
+        languages: list[str] | None = None,
         diff_only: bool = False,
-        severity_filter: Optional[list] = None,
+        severity_filter: list[str] | None = None,
         max_files: int = 20,
-        model: Optional[str] = None,
+        model: str | None = None,
         fix: bool = False,
         dry_run: bool = False,
+        passes: list[str] | None = None,
     ):
         self.repo_path = repo_path
         self.languages = languages
         self.diff_only = diff_only
-        self.severity_filter = severity_filter or ["critical", "warning", "info"]
+        self.severity_filter = set(severity_filter or ["critical", "warning", "info"])
         self.max_files = max_files
-        self.model = model or MODEL
+        self.model = model or os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL)
         self.fix = fix
         self.dry_run = dry_run
-        self.client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        # passes controls which audit passes run; default is both style + fingerprint
+        self.passes = set(passes or ["style", "fingerprint"])
+        self._client = anthropic.AsyncAnthropic()
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
 
     async def run(self) -> list[dict]:
-        files = self._collect_files()
+        files = self._discover_files()
         if not files:
-            print("⚠️  No supported source files found.")
             return []
 
-        print(f"📂 Found {len(files)} file(s) to audit...\n")
+        print(f"  Found {len(files)} file(s) to audit...\n")
+        semaphore = asyncio.Semaphore(5)  # max concurrent API calls
 
-        tasks = [self._audit_file(f) for f in files]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        async def audit_one(f):
+            async with semaphore:
+                return await self._audit_file(f)
 
-        output = []
-        for f, result in zip(files, results):
-            if isinstance(result, Exception):
-                print(f"  ⚠️  Error auditing {f.name}: {result}")
-            elif result:
-                output.append(result)
+        results = await asyncio.gather(*[audit_one(f) for f in files])
+        return [r for r in results if r]
 
-        return output
+    # ------------------------------------------------------------------
+    # File discovery
+    # ------------------------------------------------------------------
 
-    def _collect_files(self) -> list[Path]:
+    def _discover_files(self) -> list[Path]:
         if self.diff_only:
-            return self._get_diff_files()
+            return self._git_changed_files()
 
-        all_files = []
-        for ext, lang in SUPPORTED_EXTENSIONS.items():
-            if self.languages and lang not in self.languages:
+        target_exts: set[str] = set()
+        if self.languages:
+            for lang in self.languages:
+                target_exts.update(LANGUAGE_EXTENSIONS.get(lang, []))
+        else:
+            target_exts = set(EXTENSION_MAP.keys())
+
+        found = []
+        for path in sorted(self.repo_path.rglob("*")):
+            if any(skip in path.parts for skip in SKIP_DIRS):
                 continue
-            all_files.extend(self.repo_path.rglob(f"*{ext}"))
+            if path.suffix.lower() in target_exts and path.is_file():
+                found.append(path)
+            if len(found) >= self.max_files:
+                break
 
-        # Filter out hidden dirs, venvs, node_modules, etc.
-        filtered = [
-            f for f in all_files
-            if not any(part.startswith(".") or part in {
-                "node_modules", "venv", "__pycache__", "dist", "build", ".git"
-            } for part in f.parts)
-        ]
+        return found
 
-        return sorted(filtered)[: self.max_files]
-
-    def _get_diff_files(self) -> list[Path]:
+    def _git_changed_files(self) -> list[Path]:
         try:
             result = subprocess.run(
                 ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
+                timeout=10,
             )
-            changed = [
-                self.repo_path / f.strip()
-                for f in result.stdout.splitlines()
-                if f.strip()
-            ]
-            return [
-                f for f in changed
-                if f.exists() and f.suffix in SUPPORTED_EXTENSIONS
-            ][: self.max_files]
-        except Exception as e:
-            print(f"⚠️  Git diff failed ({e}), falling back to full scan.")
-            return self._collect_files()
-
-    async def _audit_file(self, file_path: Path) -> Optional[dict]:
-        try:
-            original_code = file_path.read_text(encoding="utf-8", errors="replace")
+            paths = []
+            for line in result.stdout.strip().splitlines():
+                p = self.repo_path / line.strip()
+                if p.exists() and detect_language(p):
+                    paths.append(p)
+            return paths[: self.max_files]
         except Exception:
+            return []
+
+    # ------------------------------------------------------------------
+    # Per-file audit orchestration
+    # ------------------------------------------------------------------
+
+    async def _audit_file(self, path: Path) -> dict | None:
+        language = detect_language(path)
+        if not language:
             return None
 
-        if len(original_code.strip()) < 30:
-            return None  # Skip near-empty files
+        try:
+            code = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
 
-        lang = detect_language(file_path)
-        relative_path = str(file_path.relative_to(self.repo_path))
-
-        print(f"  🔎 Auditing: {relative_path} ({lang})")
-
-        # Truncate very large files with a note
-        code = original_code
-        truncated = False
         if len(code) > MAX_FILE_CHARS:
-            code = code[:MAX_FILE_CHARS]
-            truncated = True
+            code = code[:MAX_FILE_CHARS] + "\n# ... [truncated for audit]"
 
-        issues = await self._call_claude(code, lang, relative_path)
+        rel_path = str(path.relative_to(self.repo_path))
+        all_issues: list[dict] = []
+        scores: list[int] = []
+        pass_summaries: dict[str, str] = {}
 
-        # Filter out already-fixed/accepted issues from previous runs
-        issues = filter_known_issues(self.repo_path, relative_path, issues)
+        # --- Style pass ---
+        if "style" in self.passes:
+            style_result = await self._call_claude_audit(
+                *get_style_prompts(language, rel_path, code)
+            )
+            if style_result:
+                filtered = self._filter_severity(style_result.get("issues", []))
+                all_issues.extend(self._tag_issues(filtered, "style"))
+                if (s := style_result.get("score")) is not None:
+                    scores.append(s)
+                if summary := style_result.get("summary"):
+                    pass_summaries["style"] = summary
 
-        # Apply severity filter
-        filtered_issues = [
-            i for i in issues
-            if i.get("severity", "info") in self.severity_filter
-        ]
+        # --- Fingerprint pass ---
+        if "fingerprint" in self.passes:
+            fp_result = await self._call_claude_audit(
+                *get_fingerprint_prompts(rel_path, language, code)
+            )
+            if fp_result:
+                filtered = self._filter_severity(fp_result.get("issues", []))
+                all_issues.extend(self._tag_issues(filtered, "fingerprint"))
+                if (s := fp_result.get("score")) is not None:
+                    scores.append(s)
+                if summary := fp_result.get("summary"):
+                    pass_summaries["fingerprint"] = summary
 
-        fix_result = None
-        if self.fix and filtered_issues:
-            print(f"  🔧 Fixing: {relative_path} ({len(filtered_issues)} issue(s))...")
-            fixed_code = await self._call_claude_fix(code, lang, relative_path, filtered_issues)
-            if fixed_code:
-                fix_result = apply_fix(
-                    self.repo_path, relative_path,
-                    original_code, fixed_code,
-                    filtered_issues, dry_run=self.dry_run,
-                )
-                if not self.dry_run:
-                    record_fixes(self.repo_path, relative_path, filtered_issues)
-                    print(f"  ✅ Fixed and saved. Backup at {fix_result['backup']}")
-                else:
-                    print(f"  👁️  Dry run — no files written.")
+        score = round(sum(scores) / len(scores)) if scores else 0
 
         return {
-            "file": relative_path,
-            "language": lang,
-            "truncated": truncated,
-            "issues": filtered_issues,
-            "issue_count": len(filtered_issues),
-            "health_score": self._compute_score(filtered_issues),
-            "fix_result": fix_result,
+            "file": rel_path,
+            "language": language,
+            "issues": all_issues,
+            "score": score,
+            "pass_summaries": pass_summaries,
+            "code": code,
         }
 
-    async def _call_claude(self, code: str, lang: str, file_path: str) -> list[dict]:
-        loop = asyncio.get_event_loop()
+    # ------------------------------------------------------------------
+    # Claude API calls
+    # ------------------------------------------------------------------
 
-        def _sync_call():
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=8192,
-                system=build_system_prompt(lang),
-                messages=[
-                    {"role": "user", "content": build_user_prompt(code, lang, file_path)}
-                ],
-            )
-            return response.content[0].text
-
+    async def _call_claude_audit(self, system: str, user: str) -> dict | None:
         try:
-            raw = await loop.run_in_executor(None, _sync_call)
-            # Strip markdown fences if present (```json or ```)
-            clean = raw.strip()
-            if clean.startswith("```"):
-                clean = "\n".join(clean.split("\n")[1:])
-            if "```" in clean:
-                clean = clean[:clean.rfind("```")].strip()
-            clean = clean.strip()
-            # Handle truncated JSON: find the last complete object in the array
-            try:
-                return json.loads(clean)
-            except json.JSONDecodeError:
-                # Try to recover by truncating to last valid closing brace
-                last_brace = clean.rfind("}")
-                if last_brace > 0:
-                    truncated = clean[:last_brace + 1]
-                    # Ensure it's a valid array
-                    if not truncated.strip().startswith("["):
-                        truncated = "[" + truncated
-                    if not truncated.strip().endswith("]"):
-                        truncated = truncated + "]"
-                    return json.loads(truncated)
-                raise
-        except json.JSONDecodeError:
-            print(f"    ⚠️  Could not parse JSON response for {file_path}")
-            return []
-        except Exception as e:
-            print(f"    ⚠️  Claude API error for {file_path}: {e}")
-            return []
-
-    async def _call_claude_fix(self, code: str, lang: str, file_path: str, issues: list) -> Optional[str]:
-        """Ask Claude to rewrite the file with all issues fixed. Returns corrected source code."""
-        loop = asyncio.get_event_loop()
-
-        def _sync_call():
-            response = self.client.messages.create(
+            response = await self._client.messages.create(
                 model=self.model,
-                max_tokens=4096,
-                messages=[{
-                    "role": "user",
-                    "content": build_fix_prompt(code, lang, file_path, issues),
-                }],
+                max_tokens=2048,
+                system=system,
+                messages=[{"role": "user", "content": user}],
             )
-            return response.content[0].text
-
-        try:
-            raw = await loop.run_in_executor(None, _sync_call)
-            # Strip markdown fences if model wraps in them
-            clean = raw.strip()
-            if clean.startswith("```"):
-                clean = "\n".join(clean.split("\n")[1:])
-            if clean.endswith("```"):
-                clean = "\n".join(clean.split("\n")[:-1])
-            return clean.strip()
-        except Exception as e:
-            print(f"    ⚠️  Fix API error for {file_path}: {e}")
+            raw = response.content[0].text.strip()
+            # strip accidental markdown fences
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            return json.loads(raw)
+        except (json.JSONDecodeError, IndexError, anthropic.APIError) as e:
+            print(f"    [warn] Claude API error: {e}")
             return None
 
-    def _compute_score(self, issues: list[dict]) -> int:
-        """Compute a 0–100 health score. Higher = better."""
-        total = sum(SCORE_DEDUCTIONS.get(i.get("severity", "info"), 1) for i in issues)
-        return max(0, 100 - total)
+    async def _call_claude_humanize(self, code: str, language: str, filename: str) -> str | None:
+        system, user = get_humanize_prompts(filename, language, code)
+        try:
+            response = await self._client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            result = response.content[0].text.strip()
+            # strip accidental markdown fences
+            if result.startswith("```"):
+                lines = result.splitlines()
+                result = "\n".join(lines[1:-1]) if lines[-1] == "```" else "\n".join(lines[1:])
+            return result
+        except anthropic.APIError as e:
+            print(f"    [warn] Humanize API error: {e}")
+            return None
+
+    async def _call_claude_fix(
+        self, code: str, language: str, filename: str, issues: list
+    ) -> str | None:
+        system, user = get_fix_prompts(filename, language, code, issues)
+        try:
+            response = await self._client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            result = response.content[0].text.strip()
+            if result.startswith("```"):
+                lines = result.splitlines()
+                result = "\n".join(lines[1:-1]) if lines[-1] == "```" else "\n".join(lines[1:])
+            return result
+        except anthropic.APIError as e:
+            print(f"    [warn] Fix API error: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _filter_severity(self, issues: list) -> list:
+        return [i for i in issues if i.get("severity") in self.severity_filter]
+
+    @staticmethod
+    def _tag_issues(issues: list, pass_name: str) -> list:
+        for issue in issues:
+            issue["pass"] = pass_name
+        return issues

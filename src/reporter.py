@@ -1,135 +1,177 @@
 """
-Terminal reporter — clean, colored CLI output. No browser needed.
+Reporter — colored terminal output for audit results.
+
+Renders style issues and fingerprint issues in separate sections
+so they're visually distinct and easy to act on.
 """
 
 import json
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 
-
-# ANSI color codes
-RESET  = "\033[0m"
+# ANSI
 BOLD   = "\033[1m"
-DIM    = "\033[2m"
-
-RED    = "\033[91m"
-YELLOW = "\033[93m"
-BLUE   = "\033[94m"
-GREEN  = "\033[92m"
 CYAN   = "\033[96m"
-WHITE  = "\033[97m"
+GREEN  = "\033[92m"
+YELLOW = "\033[93m"
+RED    = "\033[91m"
+BLUE   = "\033[94m"
+PURPLE = "\033[95m"
 GRAY   = "\033[90m"
+RESET  = "\033[0m"
 
-SEVERITY_STYLE = {
-    "critical": (RED,    "🔴 CRITICAL"),
-    "warning":  (YELLOW, "🟡 WARNING "),
-    "info":     (BLUE,   "🔵 INFO    "),
+SEV_COLOR = {
+    "critical": RED,
+    "warning":  YELLOW,
+    "info":     BLUE,
 }
+
+SEV_ICON = {
+    "critical": "CRIT",
+    "warning":  "WARN",
+    "info":     "INFO",
+}
+
+PASS_COLOR = {
+    "style":       CYAN,
+    "fingerprint": PURPLE,
+}
+
+PASS_LABEL = {
+    "style":       "STYLE",
+    "fingerprint": "FINGERPRINT",
+}
+
+DIVIDER = "─" * 62
 
 
 def generate_report(results: list[dict], output_path: Path, save_json: bool = False):
-    """Print a terminal report. output_path is ignored (kept for API compat); use --json to save."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    total_issues = sum(len(r["issues"]) for r in results)
+    critical = sum(1 for r in results for i in r["issues"] if i.get("severity") == "critical")
+    warnings  = sum(1 for r in results for i in r["issues"] if i.get("severity") == "warning")
+    info      = sum(1 for r in results for i in r["issues"] if i.get("severity") == "info")
+
+    fp_issues = sum(1 for r in results for i in r["issues"] if i.get("pass") == "fingerprint")
+    style_issues = total_issues - fp_issues
+
+    scores = [r["score"] for r in results if r.get("score") is not None]
+    avg_score = round(sum(scores) / len(scores)) if scores else 0
+
+    print(f"\n{BOLD}{DIVIDER}{RESET}")
+    print(f"{BOLD}  Code Audit Report  {now}{RESET}")
+    print(f"{BOLD}{DIVIDER}{RESET}\n")
+
+    print(f"  Repo Health Score:  {_score_color(avg_score)}{avg_score}/100{RESET}")
+    print(f"  Files Reviewed:     {len(results)}")
+    print(f"  Total Issues:       {BOLD}{total_issues}{RESET}  "
+          f"{RED}{critical} critical{RESET}  "
+          f"{YELLOW}{warnings} warnings{RESET}  "
+          f"{BLUE}{info} info{RESET}")
+    print(f"  Breakdown:          {CYAN}{style_issues} style{RESET}  "
+          f"{PURPLE}{fp_issues} fingerprint{RESET}\n")
+
+    for result in results:
+        _render_file(result)
+
+    if critical > 0:
+        print(f"\n{BOLD}{RED}  {critical} critical issue(s) need attention.{RESET}")
+    elif fp_issues > 0:
+        print(f"\n{BOLD}{PURPLE}  {fp_issues} AI fingerprint(s) detected — run --humanize to clean.{RESET}")
+    else:
+        print(f"\n{BOLD}{GREEN}  Looks clean.{RESET}")
+
     if save_json:
         json_path = output_path.with_suffix(".json")
-        json_path.write_text(json.dumps(results, indent=2))
-        print(f"   📦 JSON saved: {json_path.resolve()}")
-
-    _print_report(results)
+        _export_json(results, json_path)
+        print(f"\n  JSON saved to: {json_path}")
 
 
-def _print_report(results: list[dict]):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    all_issues = [i for r in results for i in r.get("issues", [])]
-    total_issues = len(all_issues)
-    critical_count = sum(1 for i in all_issues if i.get("severity") == "critical")
-    warning_count  = sum(1 for i in all_issues if i.get("severity") == "warning")
-    info_count     = sum(1 for i in all_issues if i.get("severity") == "info")
-    avg_score = (
-        round(sum(r.get("health_score", 100) for r in results) / len(results))
-        if results else 100
-    )
+def _render_file(result: dict):
+    file_path   = result["file"]
+    language    = result["language"]
+    issues      = result["issues"]
+    score       = result.get("score", 0)
+    summaries   = result.get("pass_summaries", {})
 
-    W = 60
+    issue_count = len(issues)
+    print(f"{BOLD}{DIVIDER}{RESET}")
+    print(f"  {CYAN}{file_path}{RESET}")
+    print(f"  {GRAY}{language.capitalize()} · {issue_count} issue(s) · "
+          f"Score: {_score_color(score)}{score}/100{RESET}")
 
-    # ── Header ──────────────────────────────────────────────────
-    print()
-    print(f"{BOLD}{CYAN}{'─' * W}{RESET}")
-    print(f"{BOLD}{CYAN}  🔍 AI Code Audit Report{RESET}  {GRAY}{now}{RESET}")
-    print(f"{BOLD}{CYAN}{'─' * W}{RESET}")
+    for pass_name, summary in summaries.items():
+        label = PASS_LABEL.get(pass_name, pass_name.upper())
+        color = PASS_COLOR.get(pass_name, GRAY)
+        print(f"  {color}[{label}]{RESET} {GRAY}{summary}{RESET}")
 
-    # ── Summary row ─────────────────────────────────────────────
-    score_color = GREEN if avg_score >= 80 else YELLOW if avg_score >= 50 else RED
-    print(f"\n  {BOLD}Repo Health Score:{RESET}  {score_color}{BOLD}{avg_score}/100{RESET}")
-    print(f"  {BOLD}Files Reviewed:   {RESET}  {WHITE}{len(results)}{RESET}")
-    print(f"  {BOLD}Total Issues:     {RESET}  {WHITE}{total_issues}{RESET}  "
-          f"{RED}{critical_count} critical{RESET}  "
-          f"{YELLOW}{warning_count} warnings{RESET}  "
-          f"{BLUE}{info_count} info{RESET}")
+    print(f"  {DIVIDER}")
 
-    # ── Per-file sections ────────────────────────────────────────
-    for result in results:
-        _print_file(result, W)
+    # Group by pass for cleaner rendering
+    style_issues = [i for i in issues if i.get("pass") == "style"]
+    fp_issues    = [i for i in issues if i.get("pass") == "fingerprint"]
 
-    # ── Footer ───────────────────────────────────────────────────
-    print(f"\n{BOLD}{CYAN}{'─' * W}{RESET}")
-    if critical_count > 0:
-        print(f"  {RED}{BOLD}⚠  {critical_count} critical issue(s) need attention.{RESET}")
-    else:
-        print(f"  {GREEN}{BOLD}✅  No critical issues found.{RESET}")
-    print(f"{BOLD}{CYAN}{'─' * W}{RESET}\n")
+    if style_issues:
+        print(f"\n  {BOLD}{CYAN}Style / Security{RESET}\n")
+        for issue in style_issues:
+            _render_issue(issue)
 
-
-def _print_file(result: dict, width: int):
-    issues   = result.get("issues", [])
-    score    = result.get("health_score", 100)
-    lang     = result.get("language", "").capitalize()
-    filepath = result.get("file", "")
-    truncated = " (truncated)" if result.get("truncated") else ""
-
-    score_color = GREEN if score >= 80 else YELLOW if score >= 50 else RED
-
-    print(f"\n  {BOLD}{CYAN}📄 {filepath}{RESET}{GRAY}{truncated}{RESET}")
-    print(f"  {GRAY}{lang} · {len(issues)} issue(s) · Score: "
-          f"{score_color}{BOLD}{score}/100{RESET}")
-    print(f"  {'─' * (width - 2)}")
+    if fp_issues:
+        print(f"\n  {BOLD}{PURPLE}AI Fingerprints{RESET}\n")
+        for issue in fp_issues:
+            _render_issue(issue)
 
     if not issues:
-        print(f"  {GREEN}✅  No issues found{RESET}")
-        return
+        print(f"\n  {GREEN}No issues found.{RESET}\n")
+    else:
+        print()
 
-    for issue in issues:
-        sev = issue.get("severity", "info")
-        color, label = SEVERITY_STYLE.get(sev, (GRAY, "⚪ UNKNOWN  "))
-        line  = f"line {issue['line']}" if issue.get("line") else "—"
-        rule  = issue.get("rule", "")
-        desc  = issue.get("description", "")
-        src   = issue.get("source", "")
-        sugg  = issue.get("suggestion", "").strip()
 
-        print(f"\n  {color}{BOLD}{label}{RESET}  {GRAY}{line}{RESET}  "
-              f"{CYAN}{rule}{RESET}")
-        print(f"  {WHITE}{desc}{RESET}")
-        if src:
-            print(f"  {GRAY}📖 {src}{RESET}")
-        if sugg:
-            # Indent multi-line suggestions
-            lines = sugg.splitlines()
-            print(f"  {GREEN}💡 {lines[0]}{RESET}")
-            for l in lines[1:]:
-                print(f"     {GREEN}{l}{RESET}")
+def _render_issue(issue: dict):
+    sev    = issue.get("severity", "info")
+    color  = SEV_COLOR.get(sev, GRAY)
+    icon   = SEV_ICON.get(sev, "INFO")
+    line   = f"line {issue['line']}" if issue.get("line") else "     "
+    rule   = issue.get("rule", "")
+    desc   = issue.get("description", "")
+    sugg   = issue.get("suggestion", "").strip()
 
-    # Fix result banner
-    fix = result.get("fix_result")
-    if fix:
-        if fix.get("status") == "applied":
-            print(f"\n  {GREEN}✅ {fix['issues_fixed']} issue(s) fixed — "
-                  f"backup: {fix['backup']}{RESET}")
-        elif fix.get("status") == "dry-run" and fix.get("diff"):
-            print(f"\n  {YELLOW}👁  Dry-run diff:{RESET}")
-            for l in fix["diff"].splitlines():
-                if l.startswith("+"):
-                    print(f"  {GREEN}{l}{RESET}")
-                elif l.startswith("-"):
-                    print(f"  {RED}{l}{RESET}")
-                else:
-                    print(f"  {GRAY}{l}{RESET}")
+    print(f"  {color}{BOLD}{icon}{RESET}  {GRAY}{line:<10}{RESET} {BOLD}{rule}{RESET}")
+    print(f"  {' ' * 14}{desc}")
+
+    if sugg:
+        first = sugg.splitlines()[0]
+        print(f"  {' ' * 14}{GREEN}fix: {first}{RESET}")
+    print()
+
+
+def _score_color(score: int) -> str:
+    if score >= 80:
+        return GREEN
+    if score >= 50:
+        return YELLOW
+    return RED
+
+
+def _export_json(results: list[dict], path: Path):
+    exportable = [
+        {k: v for k, v in r.items() if k != "code"}
+        for r in results
+    ]
+    path.write_text(json.dumps(exportable, indent=2), encoding="utf-8")
+
+
+def render_diff(diff: str, filename: str):
+    print(f"\n{BOLD}{CYAN}Diff preview: {filename}{RESET}")
+    print(DIVIDER)
+    for line in diff.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            print(f"{GREEN}{line}{RESET}")
+        elif line.startswith("-") and not line.startswith("---"):
+            print(f"{RED}{line}{RESET}")
+        elif line.startswith("@@"):
+            print(f"{CYAN}{line}{RESET}")
+        else:
+            print(line)
+    print()
