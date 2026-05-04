@@ -49,10 +49,10 @@ class CodeAuditor:
     async def run(self) -> list[dict]:
         files = self._collect_files()
         if not files:
-            print("No supported source files found.")
+            print("⚠️  No supported source files found.")
             return []
 
-        print(f"Found {len(files)} file(s) to audit...\n")
+        print(f"📂 Found {len(files)} file(s) to audit...\n")
 
         tasks = [self._audit_file(f) for f in files]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -60,7 +60,7 @@ class CodeAuditor:
         output = []
         for f, result in zip(files, results):
             if isinstance(result, Exception):
-                print(f"  Error auditing {f.name}: {result}")
+                print(f"  ⚠️  Error auditing {f.name}: {result}")
             elif result:
                 output.append(result)
 
@@ -104,7 +104,7 @@ class CodeAuditor:
                 if f.exists() and f.suffix in SUPPORTED_EXTENSIONS
             ][: self.max_files]
         except Exception as e:
-            print(f"Git diff failed ({e}), falling back to full scan.")
+            print(f"⚠️  Git diff failed ({e}), falling back to full scan.")
             return self._collect_files()
 
     async def _audit_file(self, file_path: Path) -> Optional[dict]:
@@ -119,7 +119,7 @@ class CodeAuditor:
         lang = detect_language(file_path)
         relative_path = str(file_path.relative_to(self.repo_path))
 
-        print(f"  Auditing: {relative_path} ({lang})")
+        print(f"  🔎 Auditing: {relative_path} ({lang})")
 
         # Truncate very large files with a note
         code = original_code
@@ -141,7 +141,7 @@ class CodeAuditor:
 
         fix_result = None
         if self.fix and filtered_issues:
-            print(f"  Fixing: {relative_path} ({len(filtered_issues)} issue(s))...")
+            print(f"  🔧 Fixing: {relative_path} ({len(filtered_issues)} issue(s))...")
             fixed_code = await self._call_claude_fix(code, lang, relative_path, filtered_issues)
             if fixed_code:
                 fix_result = apply_fix(
@@ -151,9 +151,9 @@ class CodeAuditor:
                 )
                 if not self.dry_run:
                     record_fixes(self.repo_path, relative_path, filtered_issues)
-                    print(f"  Fixed and saved. Backup at {fix_result['backup']}")
+                    print(f"  ✅ Fixed and saved. Backup at {fix_result['backup']}")
                 else:
-                    print(f"  Dry run -- no files written.")
+                    print(f"  👁️  Dry run — no files written.")
 
         return {
             "file": relative_path,
@@ -204,10 +204,10 @@ class CodeAuditor:
                     return json.loads(truncated)
                 raise
         except json.JSONDecodeError:
-            print(f"    Could not parse JSON response for {file_path}")
+            print(f"    ⚠️  Could not parse JSON response for {file_path}")
             return []
         except Exception as e:
-            print(f"    Claude API error for {file_path}: {e}")
+            print(f"    ⚠️  Claude API error for {file_path}: {e}")
             return []
 
     async def _call_claude_fix(self, code: str, lang: str, file_path: str, issues: list) -> Optional[str]:
@@ -235,7 +235,7 @@ class CodeAuditor:
                 clean = "\n".join(clean.split("\n")[:-1])
             return clean.strip()
         except Exception as e:
-            print(f"    Fix API error for {file_path}: {e}")
+            print(f"    ⚠️  Fix API error for {file_path}: {e}")
             return None
 
     def _compute_score(self, issues: list[dict]) -> int:
